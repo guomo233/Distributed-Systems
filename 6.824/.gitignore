@@ -3,6 +3,7 @@ api.key
 *-handin.tar.gz
 mr-tmp/
 *.so
+*.log
 mrmaster
 mrsequential
 mrworker
