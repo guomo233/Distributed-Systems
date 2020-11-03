@@ -1,5 +1,5 @@
 # 设计
-* 一个 Raft 被一个 Service 依赖着，接受来自 Service 的 command，并在 command committed 后通知 Service apply command；
+* 一个 Raft 被一个 Service 依赖着，Leader 接受来自 Service 的 command，每个节点在 command committed 后通知 Service apply command；
 * 不用实现成员变更；
 * 在 Lab 3 再实现日志压缩；
 * 心跳 RPC 频率不能超过每秒 10 次，所需选举超时得大于 100ms；
