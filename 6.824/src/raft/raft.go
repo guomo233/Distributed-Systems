@@ -205,9 +205,14 @@ type RequestVoteReply struct {
 type AppendEntriesReply struct {
 	Term int
 	Success bool
+	
+	// fast backup
+	XTerm int
+	XIndex int
+	XLen int
 }
 
-// TODO lock more effective
+// TODO more effective: lock, ...
 
 //
 // example RequestVote RPC handler.
@@ -289,6 +294,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	   rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		log.Printf("[follower: %d, term: %d] reject AppendEntries from [leader: %d, term: %d]: need PrevLogIndex %d but got PrevLogIndex %d\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, len(rf.log) - 1, args.PrevLogIndex)
 		reply.Success = false
+		
+		// fast backup
+		if args.PrevLogIndex >= len(rf.log) {
+			reply.XTerm = -1
+			reply.XLen = len(rf.log)
+		} else {
+			reply.XTerm = rf.log[args.PrevLogIndex].Term
+			var xindex int
+			// TODO binary search
+			for xindex = args.PrevLogIndex;
+			    xindex >= 1 && rf.log[xindex].Term == reply.XTerm;
+			    xindex-- {}
+			reply.XIndex = xindex + 1
+		}
+		
 		return
 	}
 	
@@ -402,6 +422,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	log.Printf("%d dead\n", rf.me)
 }
 
 func (rf *Raft) killed() bool {
@@ -496,17 +517,18 @@ func (rf *Raft) election(term int) {
 }
 
 func (rf *Raft) checkCommit() {
-	// TODO more effctive, find k-th min, k = half
+	// TODO more effctive
 	rf.matchIndex[rf.me] = len(rf.log) - 1
 	matchIndex := make([]int, len(rf.matchIndex))
 	copy(matchIndex, rf.matchIndex)
 	sort.Ints(matchIndex)
 	half := len(rf.peers) / 2
+	
 	log.Printf("[DEBUG] matchIndex: %v, half: %d\n", matchIndex, half)
-	if rf.commitIndex < matchIndex[half] {
-		for i := rf.commitIndex + 1;
-		    i <= matchIndex[half];
-		    i++ {
+	
+	if rf.commitIndex < matchIndex[half] &&
+	   rf.currentTerm == rf.log[matchIndex[half]].Term {
+		for i := rf.commitIndex + 1; i <= matchIndex[half]; i++ {
 			log.Printf("[leader: %d, term: %d] apply command [%v] with index [%d]\n", rf.me, rf.currentTerm, rf.log[i].Command, i)
 			rf.applyCh <- ApplyMsg{true, rf.log[i].Command, i}
 		}
@@ -523,7 +545,7 @@ func (rf *Raft) hearbeatFeedback(peer int, args *AppendEntriesArgs, reply *Appen
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	
-	log.Printf("[leader: %d, term: %d] receive AppendEntries feedback from [follower: %d, term: %d] with [PrevLogIndex: %d, PrevLogTerm: %d, entries: %v]\n", rf.me, rf.currentTerm, peer, reply.Term, args.PrevLogIndex, args.PrevLogTerm, args.Entries)
+	log.Printf("[leader: %d, term: %d] receive AppendEntries feedback with [PrevLogIndex: %d, PrevLogTerm: %d, entries: %v] from [follower: %d, term: %d] \n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.Entries, peer, reply.Term)
 	
 	if rf.state != leader || args.Term != rf.currentTerm {
 		return
@@ -540,10 +562,28 @@ func (rf *Raft) hearbeatFeedback(peer int, args *AppendEntriesArgs, reply *Appen
 		rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
 	} else {
 		rf.matchIndex[peer] = 0
-		rf.nextIndex[peer] = args.PrevLogIndex
+//		rf.nextIndex[peer] = args.PrevLogIndex
+		
+		// fast backup
+		if reply.XTerm == -1 {
+			rf.nextIndex[peer] = reply.XLen
+		} else {
+			var xindex int
+			// TODO binary search
+			for xindex = args.PrevLogIndex;
+			    xindex >= 1 && rf.log[xindex].Term != reply.XTerm;
+			    xindex-- {}
+			if xindex > 0 {
+				rf.nextIndex[peer] = xindex
+			} else {
+				rf.nextIndex[peer] = reply.XIndex
+			}
+		}
+		
 		args.PrevLogIndex = rf.nextIndex[peer] - 1
 		args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 		args.Entries = nil
+		
 		log.Printf("[leader: %d, term: %d] re-send AppendEntries with [PrevLogIndex: %d, PrevLogTerm: %d, entries: %v] to [follower: %d]\n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.Entries, peer)
 		go rf.sendAppendEntries(peer, args, reply)
 	}
@@ -557,6 +597,8 @@ func (rf *Raft) heartbeats(term, interval int) {
 			rf.mu.Unlock()
 			return
 		}
+		
+		rf.checkCommit()
 		
 		for peer := range rf.peers {
 			args := AppendEntriesArgs {
@@ -581,8 +623,6 @@ func (rf *Raft) heartbeats(term, interval int) {
 			}
 		}
 		
-		rf.checkCommit()
-		
 		rf.mu.Unlock()
 		
 		for tick := 0; tick < interval; tick++ {
@@ -594,7 +634,7 @@ func (rf *Raft) heartbeats(term, interval int) {
 func (rf *Raft) electionTimeout() {
 	for !rf.killed() {
 		rf.electionTick.set(0)
-		for timeout := rand.Intn(150) + 300;
+		for timeout := rand.Intn(150) + 500; // important for 22C
 		    rf.electionTick.get() < timeout;
 		    rf.electionTick.add() {
 			time.Sleep(time.Millisecond)

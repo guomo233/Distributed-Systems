@@ -1,18 +1,15 @@
 package raft
 
-//import (
-//	"log"
-//	"os"
-//)
-//
-//var logFilename string = "raft.log"
-//
-//func init() {
-//	f, err := os.Open(logFilename)
-//	if os.IsNotExist(err) {
-//		f, err = os.Create(logFilename)
-//		// TODO handle err
-//	}
-//	log.SetOutput(f)
-//	// TODO flush before exit
-//}
+import (
+	"log"
+	"os"
+)
+
+var logFilename string = "/dev/null"
+
+func init() {
+	f, _ := os.Create(logFilename)
+	// TODO handle err
+	log.SetOutput(f)
+	// TODO flush before exit
+}
