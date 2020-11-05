@@ -405,9 +405,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
+	// Your code here, if desired.
 	rf.electionTick.stop()
 	rf.heartbeatTick.stop()
-	// Your code here, if desired.
 	log.Printf("%d dead\n", rf.me)
 }
 
@@ -515,8 +515,6 @@ func (rf *Raft) checkCommit() {
 	sort.Ints(matchIndex)
 	half := len(rf.peers) / 2
 	
-	log.Printf("[DEBUG] matchIndex: %v, half: %d\n", matchIndex, half)
-	
 	if rf.commitIndex < matchIndex[half] &&
 	   rf.currentTerm == rf.log[matchIndex[half]].Term {
 		for i := rf.commitIndex + 1; i <= matchIndex[half]; i++ {
@@ -587,6 +585,10 @@ func (rf *Raft) heartbeats() {
 	rf.checkCommit()
 	
 	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+		
 		args := AppendEntriesArgs {
 			Term: rf.currentTerm,
 			LeaderId: rf.me,
@@ -603,10 +605,8 @@ func (rf *Raft) heartbeats() {
 			rf.nextIndex[peer]++
 		}
 		
-		if peer != rf.me {
-			log.Printf("[leader: %d, term: %d] send AppendEntries with [PrevLogIndex: %d, PrevLogTerm: %d, entries: %v] to [follower: %d]\n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.Entries, peer)
-			go rf.sendAppendEntries(peer, &args, &reply)
-		}
+		log.Printf("[leader: %d, term: %d] send AppendEntries with [PrevLogIndex: %d, PrevLogTerm: %d, entries: %v] to [follower: %d]\n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.Entries, peer)
+		go rf.sendAppendEntries(peer, &args, &reply)
 	}
 }
 
@@ -632,7 +632,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
-	rf.electionTick = newTick(1000, 150, rf.election, false)
+	rf.electionTick = newTick(500, 150, rf.election, false)
 	rf.heartbeatTick = newTick(100, 0, rf.heartbeats, true)
 
 	// initialize from state persisted before a crash
