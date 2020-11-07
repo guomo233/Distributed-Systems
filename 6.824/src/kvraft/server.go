@@ -8,7 +8,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"runtime"
 )
 
 const Debug = 0
@@ -42,16 +41,8 @@ type KVServer struct {
 
 	// Your definitions here.
 	applied map[int64]bool
-	applyFeedback map[int64](chan struct{})
+	applyFeedback map[int64](func())
 	kv map[string]string
-}
-
-// DEBUG
-func runFuncName()string{
-	pc := make([]uintptr,1)
-	runtime.Callers(2,pc)
-	f := runtime.FuncForPC(pc[0])
-	return f.Name()
 }
 
 func (kv *KVServer) checkApply() {
@@ -76,61 +67,64 @@ func (kv *KVServer) checkApply() {
 		}
 		
 		if kv.applyFeedback[op.Id] != nil {
-			kv.applyFeedback[op.Id] <- struct{}{}
+			kv.applyFeedback[op.Id]()
 		}
 		
 		kv.mu.Unlock()
 	}
 }
 
-func (kv *KVServer) waitApply(id int64, timeout int) bool {
-	kv.mu.Lock()
-	applyFeedback := kv.applyFeedback[id]
-	kv.mu.Unlock()
-
-	var res bool
-	select {
-		case <- applyFeedback:
-			res = true
-		case <- time.After(time.Duration(timeout) * time.Millisecond):
-			res = false
+func (kv *KVServer) registerFeedback(ch chan struct{}, opId int64, handler func()) {
+	kv.applyFeedback[opId] = func() {
+		delete(kv.applyFeedback, opId)
+		if handler != nil {
+			handler()
+		}
+		ch <- struct{}{}
 	}
-	
-	kv.mu.Lock()
-	delete(kv.applyFeedback, id)
-	kv.mu.Unlock()
-	
-	return res
+}
+
+func (kv *KVServer) cancelFeedback(opId int64) {
+	delete(kv.applyFeedback, opId)
+}
+
+func (kv *KVServer) waitFeedback(ch chan struct{}, timeout int) bool {
+	select {
+		case <- ch:
+			return true
+		case <- time.After(time.Duration(timeout) * time.Millisecond):
+			return false
+	}
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	id := nrand()
+	opId := nrand()
+	
+	feedbackCh := make(chan struct{}, 1)
 	
 	kv.mu.Lock()
-	kv.applyFeedback[id] = make(chan struct{}, 1)
+	kv.registerFeedback(feedbackCh, opId, func() {
+		reply.Value = kv.kv[args.Key]
+	})
 	kv.mu.Unlock()
 	
-	op := Op{Id: id}
+	op := Op{Id: opId}
 	if _, _, ok := kv.rf.Start(op); !ok {
 		log.Printf("[Server %d] reject request Get(%s): isn't leader\n", kv.me, args.Key)
 		kv.mu.Lock()
-		delete(kv.applyFeedback, op.Id)
+		kv.cancelFeedback(opId)
 		kv.mu.Unlock()
 		
 		reply.Err = ErrWrongLeader
 		return
 	}
 	
-	if !kv.waitApply(op.Id, 300) {
+	if !kv.waitFeedback(feedbackCh, 300) {
 		log.Printf("[Server %d] reject request Get(%s): apply timeout\n", kv.me, args.Key)
 		reply.Err = ErrWrongLeader
-		return	
+		return
 	}
-	
-	kv.mu.Lock()
-	reply.Value = kv.kv[args.Key]
-	kv.mu.Unlock()
 	
 	reply.Err = OK
 	log.Printf("[Server %d] done request Get(%s): %s\n", kv.me, args.Key, reply.Value)
@@ -138,6 +132,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	feedbackCh := make(chan struct{}, 1)
+	
 	kv.mu.Lock()
 	
 	if kv.applied[args.Id] {
@@ -147,7 +143,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	
-	kv.applyFeedback[args.Id] = make(chan struct{}, 1)
+	kv.registerFeedback(feedbackCh, args.Id, nil)
 	
 	kv.mu.Unlock()
 	
@@ -155,14 +151,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	if _, _, ok := kv.rf.Start(op); !ok {
 		log.Printf("[Server %d] reject request[%d] %s(%s, %s): isn't leader\n", kv.me, args.Id , args.Op, args.Key, args.Value)
 		kv.mu.Lock()
-		delete(kv.applyFeedback, op.Id)
+		kv.cancelFeedback(op.Id)
 		kv.mu.Unlock()
 		
 		reply.Err = ErrWrongLeader
 		return
 	}
 	
-	if !kv.waitApply(op.Id, 300) {
+	if !kv.waitFeedback(feedbackCh, 300) {
 		log.Printf("[Server %d] reject request[%d] %s(%s, %s): apply timeout\n", kv.me, args.Id , args.Op, args.Key, args.Value)
 		reply.Err = ErrWrongLeader
 		return
@@ -218,7 +214,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.applied = make(map[int64]bool)
-	kv.applyFeedback = make(map[int64](chan struct{}))
+	kv.applyFeedback = make(map[int64](func()))
 	kv.kv = make(map[string]string)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
