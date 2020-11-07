@@ -3,11 +3,13 @@ package kvraft
 import "../labrpc"
 import "crypto/rand"
 import "math/big"
-
+import "log"
+import "time"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	leader int
 }
 
 func nrand() int64 {
@@ -37,9 +39,26 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	// TODO optimize: no log
+	for {
+		nServers := len(ck.servers)
+		for i := 0; i < nServers; i++ {
+			args := GetArgs{key}
+			reply := GetReply{}
+			log.Printf("[Client] send request Get(%s) to server %d\n", key, ck.leader)
+			ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
+			if reply.Err == OK {
+				log.Printf("[Client] got reply Get(%s) from server %d: %s\n", key, ck.leader, reply.Value)
+				return reply.Value
+			}
+
+			ck.leader = (ck.leader + 1) % nServers
+		}
+		
+		time.Sleep(500 * time.Millisecond)
+		log.Printf("[Client] retry request Get(%s)\n", key)
+	}
 }
 
 //
@@ -54,6 +73,26 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	opId := nrand()
+	
+	for {
+		nServers := len(ck.servers)
+		for i := 0; i < nServers; i++ {
+			args := PutAppendArgs{key, value, op, opId}
+			reply := PutAppendReply{}
+			log.Printf("[Client] send request[%d] %s(%s, %s) to server %d\n", args.Id, op, key, value, ck.leader)
+			ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
+			if reply.Err == OK {
+				log.Printf("[Client] got reply[%d] %s(%s, %s) from server %d\n", args.Id, op, key, value, ck.leader)
+				return
+			}
+			
+			ck.leader = (ck.leader + 1) % nServers
+		}
+		
+		time.Sleep(500 * time.Millisecond)
+		log.Printf("[Client] retry request[%d] %s(%s, %s)\n", opId, op, key, value)
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

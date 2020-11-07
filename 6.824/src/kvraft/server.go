@@ -7,6 +7,8 @@ import (
 	"../raft"
 	"sync"
 	"sync/atomic"
+	"time"
+	"runtime"
 )
 
 const Debug = 0
@@ -23,6 +25,10 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Op string
+	Key string
+	Value string
+	Id int64
 }
 
 type KVServer struct {
@@ -35,15 +41,135 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	applied map[int64]bool
+	applyFeedback map[int64](chan struct{})
+	kv map[string]string
 }
 
+// DEBUG
+func runFuncName()string{
+	pc := make([]uintptr,1)
+	runtime.Callers(2,pc)
+	f := runtime.FuncForPC(pc[0])
+	return f.Name()
+}
+
+func (kv *KVServer) checkApply() {
+	for {
+		op := (<-kv.applyCh).Command.(Op)
+		
+		kv.mu.Lock()
+		
+		if kv.applied[op.Id] {
+			kv.mu.Unlock()
+			continue
+		}
+		
+		kv.applied[op.Id] = true
+		switch op.Op {
+		case "Put":
+			log.Printf("[Server %d] apply request[%d] Put(%s, %s)\n", kv.me, op.Id, op.Key, op.Value)
+			kv.kv[op.Key] = op.Value
+		case "Append":
+			log.Printf("[Server %d] apply request[%d] Append(%s, %s)\n", kv.me, op.Id, op.Key, op.Value)
+			kv.kv[op.Key] += op.Value
+		}
+		
+		if kv.applyFeedback[op.Id] != nil {
+			kv.applyFeedback[op.Id] <- struct{}{}
+		}
+		
+		kv.mu.Unlock()
+	}
+}
+
+func (kv *KVServer) waitApply(id int64, timeout int) bool {
+	kv.mu.Lock()
+	applyFeedback := kv.applyFeedback[id]
+	kv.mu.Unlock()
+
+	var res bool
+	select {
+		case <- applyFeedback:
+			res = true
+		case <- time.After(time.Duration(timeout) * time.Millisecond):
+			res = false
+	}
+	
+	kv.mu.Lock()
+	delete(kv.applyFeedback, id)
+	kv.mu.Unlock()
+	
+	return res
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	id := nrand()
+	
+	kv.mu.Lock()
+	kv.applyFeedback[id] = make(chan struct{}, 1)
+	kv.mu.Unlock()
+	
+	op := Op{Id: id}
+	if _, _, ok := kv.rf.Start(op); !ok {
+		log.Printf("[Server %d] reject request Get(%s): isn't leader\n", kv.me, args.Key)
+		kv.mu.Lock()
+		delete(kv.applyFeedback, op.Id)
+		kv.mu.Unlock()
+		
+		reply.Err = ErrWrongLeader
+		return
+	}
+	
+	if !kv.waitApply(op.Id, 300) {
+		log.Printf("[Server %d] reject request Get(%s): apply timeout\n", kv.me, args.Key)
+		reply.Err = ErrWrongLeader
+		return	
+	}
+	
+	kv.mu.Lock()
+	reply.Value = kv.kv[args.Key]
+	kv.mu.Unlock()
+	
+	reply.Err = OK
+	log.Printf("[Server %d] done request Get(%s): %s\n", kv.me, args.Key, reply.Value)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	
+	if kv.applied[args.Id] {
+		log.Printf("[Server %d] reject request[%d] %s(%s, %s): isn't leader\n", kv.me, args.Id , args.Op, args.Key, args.Value)
+		kv.mu.Unlock()
+		reply.Err = OK
+		return
+	}
+	
+	kv.applyFeedback[args.Id] = make(chan struct{}, 1)
+	
+	kv.mu.Unlock()
+	
+	op := Op{args.Op, args.Key, args.Value, args.Id}
+	if _, _, ok := kv.rf.Start(op); !ok {
+		log.Printf("[Server %d] reject request[%d] %s(%s, %s): isn't leader\n", kv.me, args.Id , args.Op, args.Key, args.Value)
+		kv.mu.Lock()
+		delete(kv.applyFeedback, op.Id)
+		kv.mu.Unlock()
+		
+		reply.Err = ErrWrongLeader
+		return
+	}
+	
+	if !kv.waitApply(op.Id, 300) {
+		log.Printf("[Server %d] reject request[%d] %s(%s, %s): apply timeout\n", kv.me, args.Id , args.Op, args.Key, args.Value)
+		reply.Err = ErrWrongLeader
+		return
+	}
+	
+	reply.Err = OK
+	log.Printf("[Server %d] done request[%d] %s(%s, %s)\n", kv.me, args.Id, args.Op, args.Key, args.Value)
 }
 
 //
@@ -91,11 +217,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
+	kv.applied = make(map[int64]bool)
+	kv.applyFeedback = make(map[int64](chan struct{}))
+	kv.kv = make(map[string]string)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	go kv.checkApply()
 
 	return kv
 }
