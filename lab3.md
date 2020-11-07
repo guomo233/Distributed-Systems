@@ -1,4 +1,6 @@
-# 实验要求
+# Part A
+
+## 实验要求
 * key 和 value 都是字符串；
 * 服务支持三种操作：
 	* `Put(key, value)`：替换`key`对应的`value`；
@@ -14,6 +16,9 @@
 * 当发生分区时，允许服务器和客户端无限期等待，直到分区恢复；
 * Your scheme for duplicate detection should free server memory quickly, for example by having each RPC imply that the client has seen the reply for its previous RPC. It's OK to assume that a client will make only one call into a Clerk at a time？？？
 
-客户端实现于 kvraft/client.go，；
+# Part B
 
-服务端实现于 kvraft/server.go，每个 KVServer 都和单个 Raft 节点对应
+## 实验要求
+
+* K/V Server 负责创建快照，并通知 Raft 丢弃日志；
+* 
