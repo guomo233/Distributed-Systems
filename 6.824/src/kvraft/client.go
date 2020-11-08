@@ -10,6 +10,7 @@ type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	leader int
+	clerkId int64
 }
 
 func nrand() int64 {
@@ -23,6 +24,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.clerkId = nrand()
 	return ck
 }
 
@@ -78,12 +80,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		nServers := len(ck.servers)
 		for i := 0; i < nServers; i++ {
-			args := PutAppendArgs{key, value, op, opId}
+			args := PutAppendArgs{key, value, op, ck.clerkId, opId}
 			reply := PutAppendReply{}
-			log.Printf("[Client] send request[%d] %s(%s, %s) to server %d\n", args.Id, op, key, value, ck.leader)
+			log.Printf("[Client] send request[%d:%d] %s(%s, %s) to server %d\n", args.ClerkId, opId, op, key, value, ck.leader)
 			ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
 			if reply.Err == OK {
-				log.Printf("[Client] got reply[%d] %s(%s, %s) from server %d\n", args.Id, op, key, value, ck.leader)
+				log.Printf("[Client] got reply[%d:%d] %s(%s, %s) from server %d\n", args.ClerkId, opId, op, key, value, ck.leader)
 				return
 			}
 			
