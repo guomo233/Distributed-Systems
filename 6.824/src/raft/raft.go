@@ -204,12 +204,6 @@ type AppendEntriesReply struct {
 	XLen int
 }
 
-// TODO more effective
-// TestBackup2B: need 28.6 but 31.6s
-// TestFigure82C: need 35.1 but 37.3s
-// TestUnreliableAgree2C: need 4.2 but 14.1s
-// TestFigure8Unreliable2C: need 36.3 but 39.2
-
 //
 // example RequestVote RPC handler.
 //
@@ -400,9 +394,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	
 	logIndex := rf.lastLogIndex() + 1
-	//log.Printf("[leader: %d, term: %d] append new command [%v] in index [%d]", rf.me, rf.currentTerm, command, logIndex)
 	rf.log = append(rf.log, LogEntries{command, rf.currentTerm, logIndex})
 	rf.persist()
+	//log.Printf("[leader: %d, term: %d] append new command [%v] in index [%d]", rf.me, rf.currentTerm, command, logIndex)
+	
+	rf.heartbeatTick.trigger()
+	
 	return logIndex, rf.currentTerm, true
 }
 
@@ -453,7 +450,7 @@ func (rf *Raft) turnLeader() {
 		rf.matchIndex[peer] = 0
 	}
 	rf.electionTick.stop()
-	rf.heartbeatTick.start()
+	rf.heartbeatTick.trigger()
 	//log.Printf("%d turn leader with term %d\n", rf.me, rf.currentTerm)
 }
 
@@ -563,6 +560,9 @@ func (rf *Raft) appendEntriesFeedback(peer int, args *AppendEntriesArgs, reply *
 	
 	if reply.Success {
 		rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
+		if rf.matchIndex[peer] > rf.commitIndex {
+			rf.checkCommit()
+		}
 		return
 	}
 	
@@ -598,8 +598,6 @@ func (rf *Raft) appendEntriesFeedback(peer int, args *AppendEntriesArgs, reply *
 func (rf *Raft) heartbeats() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	
-	rf.checkCommit()
 	
 	for peer := range rf.peers {
 		if peer == rf.me {
@@ -650,8 +648,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
-	rf.electionTick = newTick(500, 150, rf.election, false)
-	rf.heartbeatTick = newTick(100, 0, rf.heartbeats, true)
+	rf.electionTick = newTick(500, 150, rf.election)
+	rf.heartbeatTick = newTick(100, 0, rf.heartbeats)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

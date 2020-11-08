@@ -22,43 +22,44 @@ func (at *atomicValue) add() {
 
 type ticker struct {
 	now atomicValue
+	handler func()
+	timeout int
+	bias int
 	stopCh chan struct{}
 	startCh chan struct{}
 	stoped bool
 }
 
-func (t *ticker) beginTick(baseTimeout, bias int, handler func (), before bool) {
+func (t *ticker) beginTick() {
 	for {
-		timeout := baseTimeout
-		
-		if bias > 0 {
-			timeout += rand.Intn(bias)
+		finalTimeout := t.timeout
+		if t.bias > 0 {
+			finalTimeout += rand.Intn(t.bias)
 		}
 		
-		for t.now.set(0); t.now.get() < timeout; t.now.add() {
+		for t.now.set(0); t.now.get() < finalTimeout; t.now.add() {
 			select {
 				case <- t.stopCh:
 					<- t.startCh
-					if before {
-						handler()
-					}
 				default: // non-block
 			}
 			
 			time.Sleep(time.Millisecond)
 		}
 		
-		handler()
+		t.handler()
 	}
 }
 
-func newTick(timeout int, bias int, handler func (), before bool) *ticker {
+func newTick(timeout int, bias int, handler func()) *ticker {
 	t := &ticker{}
 	t.stopCh = make(chan struct{}, 1)
 	t.startCh = make(chan struct{})
-	t.reset()
+	t.handler = handler
+	t.timeout = timeout
+	t.bias = bias
 	t.stop()
-	go t.beginTick(timeout, bias, handler, before)
+	go t.beginTick()
 	return t
 }
 
@@ -71,7 +72,6 @@ func (t *ticker) stop() {
 
 func (t *ticker) start() {
 	if t.stoped {
-		t.reset()
 		t.startCh <- struct{}{}
 		t.stoped = false
 	}
@@ -79,4 +79,9 @@ func (t *ticker) start() {
 
 func (t *ticker) reset() {
 	t.now.set(0)
+}
+
+func (t *ticker) trigger() {
+	t.now.set(t.timeout + t.bias)
+	t.start()
 }
