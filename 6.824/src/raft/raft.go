@@ -21,7 +21,7 @@ import "sync"
 import "sync/atomic"
 import "../labrpc"
 import "sort"
-//import "log"
+import "log"
 import "bytes"
 import "../labgob"
 
@@ -98,12 +98,23 @@ func min(a, b int) int {
 	return b
 }
 
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func (rf *Raft) logi(index int) int {
-	return index - rf.log[0].Index
+	return index - rf.lastIncludedIndex()
 }
 
 func (rf *Raft) lastLogIndex() int {
 	return rf.log[len(rf.log) - 1].Index
+}
+
+func (rf *Raft) lastIncludedIndex() int {
+	return rf.log[0].Index
 }
 
 // return currentTerm and whether this server
@@ -130,7 +141,44 @@ func (rf *Raft) persist() {
 	e.Encode(rf.log)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-	//log.Printf("%d write persist [term: %d, voted: %d, log: %v]\n", rf.me, rf.currentTerm, rf.votedFor, rf.log)
+	log.Printf("%d write persist [term: %d, voted: %d, log: %v]\n", rf.me, rf.currentTerm, rf.votedFor, rf.log)
+}
+
+func (rf *Raft) snapshot(lastIncludedIndex, lastIncludedTerm int, snapshot []byte) {
+	
+	if lastIncludedIndex > rf.lastLogIndex() {
+		rf.log = []LogEntries{LogEntries{nil, lastIncludedTerm, lastIncludedIndex}}
+	} else {
+		rf.log = rf.log[rf.logi(lastIncludedIndex):]
+	}
+	
+	log.Printf("%d load snapshot [:%d]\n", rf.me, lastIncludedIndex)
+	
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	
+	rf.persister.SaveStateAndSnapshot(data, snapshot)
+	
+	if rf.commitIndex < lastIncludedIndex {
+		rf.applyCh <- ApplyMsg{false, nil, lastIncludedIndex}
+		rf.commitIndex = lastIncludedIndex
+	}
+}
+
+func (rf *Raft) Snapshot(lastIncludedIndex int, snapshot []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	
+	if lastIncludedIndex <= rf.lastIncludedIndex() ||
+	   lastIncludedIndex > rf.lastLogIndex() {
+		return
+	}
+	
+	rf.snapshot(lastIncludedIndex, rf.log[rf.logi(lastIncludedIndex)].Term, snapshot)
 }
 
 //
@@ -149,10 +197,10 @@ func (rf *Raft) readPersist(data []byte) {
 	if d.Decode(&currentTerm) != nil ||
 	   d.Decode(&votedFor) != nil || 
 	   d.Decode(&logs) != nil {
-		//log.Printf("%d read persist error\n", rf.me)
+		log.Printf("%d read persist error\n", rf.me)
 		// TODO error...
 	} else {
-		//log.Printf("%d read persist [term: %d, voted: %d, log: %v]\n", rf.me, currentTerm, votedFor, logs)
+		log.Printf("%d read persist [term: %d, voted: %d, log: %v]\n", rf.me, currentTerm, votedFor, logs)
 		
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
@@ -184,6 +232,14 @@ type AppendEntriesArgs struct {
 	LeaderCommit int
 }
 
+type InstallSnapshotArgs struct {
+	Term int
+	LeaderId int
+	LastIncludedIndex int
+	LastIncludedTerm int
+	Data []byte
+}
+
 //
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
@@ -204,6 +260,10 @@ type AppendEntriesReply struct {
 	XLen int
 }
 
+type InstallSnapshotReply struct {
+	Term int
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -216,10 +276,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	
-	//log.Printf("%d receive RequestVote from %d\n", rf.me, args.CandidateId)
+	log.Printf("%d receive RequestVote from %d\n", rf.me, args.CandidateId)
 	
 	if args.Term > rf.currentTerm {
-		//log.Printf("%d new term %d -> %d\n", rf.me, rf.currentTerm, args.Term)
+		log.Printf("%d new term %d -> %d\n", rf.me, rf.currentTerm, args.Term)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		if rf.state != follower {
@@ -231,7 +291,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	
 	if args.Term < rf.currentTerm ||
 	   rf.votedFor != -1 {
-		//log.Printf("%d reject vote to %d: term %d candidate term %d votedFor: %d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, rf.votedFor)
+		log.Printf("%d reject vote to %d: term %d candidate term %d votedFor: %d\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, rf.votedFor)
 		reply.VoteGranted = false
 		return
 	}
@@ -241,12 +301,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.LastLogTerm < lastLogTerm ||
 	   (args.LastLogTerm == lastLogTerm &&
 	    args.LastLogIndex < lastLogIndex) {
-		//log.Printf("%d reject vote to %d: LastLogTerm %d LastLogIndex %d but candidate LastLogTerm %d LastLogIndex %d\n", rf.me, args.CandidateId, lastLogTerm, lastLogIndex, args.LastLogTerm, args.LastLogIndex)
+		log.Printf("%d reject vote to %d: LastLogTerm %d LastLogIndex %d but candidate LastLogTerm %d LastLogIndex %d\n", rf.me, args.CandidateId, lastLogTerm, lastLogIndex, args.LastLogTerm, args.LastLogIndex)
 		reply.VoteGranted = false
 		return
 	}
 	
-	//log.Printf("%d vote to %d\n", rf.me, args.CandidateId)
+	log.Printf("%d vote to %d\n", rf.me, args.CandidateId)
 	rf.votedFor = args.CandidateId
 	reply.VoteGranted = true
 	
@@ -261,7 +321,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	
-	//log.Printf("[follower: %d, term: %d] receive AppendEntries with [PrevLogIndex: %d, PrevLogTerm: %d, entries: %v] from [leader: %d, term: %d]\n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.Entries, args.LeaderId, args.Term)
+	log.Printf("[follower: %d, term: %d] receive AppendEntries with [PrevLogIndex: %d, PrevLogTerm: %d, entries: %v] from [leader: %d, term: %d]\n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.Entries, args.LeaderId, args.Term)
 	
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
@@ -273,7 +333,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	
 	if args.Term < rf.currentTerm {
-		//log.Printf("[follower: %d, term: %d] reject AppendEntries from [leader: %d, term: %d]: term not match\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
+		log.Printf("[follower: %d, term: %d] reject AppendEntries from [leader: %d, term: %d]: term not match\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
 		reply.Success = false
 		return
 	}
@@ -281,8 +341,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.electionTick.reset()
 	
 	if args.PrevLogIndex > rf.lastLogIndex() ||
-	   rf.log[rf.logi(args.PrevLogIndex)].Term != args.PrevLogTerm {
-		//log.Printf("[follower: %d, term: %d] reject AppendEntries from [leader: %d, term: %d]: need PrevLogIndex %d but got PrevLogIndex %d\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, rf.lastLogIndex() - 1, args.PrevLogIndex)
+	   (rf.logi(args.PrevLogIndex) > 0 &&
+	   rf.log[rf.logi(args.PrevLogIndex)].Term != args.PrevLogTerm) {
+		log.Printf("[follower: %d, term: %d] reject AppendEntries from [leader: %d, term: %d]: need PrevLogIndex %d but got PrevLogIndex %d\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, rf.lastLogIndex() - 1, args.PrevLogIndex)
 		reply.Success = false
 		
 		// fast backup
@@ -304,25 +365,68 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	
-	rf.log = rf.log[:rf.logi(args.PrevLogIndex) + 1]
-	rf.log = append(rf.log, args.Entries...)
+	i := max(rf.logi(args.PrevLogIndex + 1), 1)
+	j := min(max(1 - rf.logi(args.PrevLogIndex + 1), 0),
+	         len(args.Entries))
+	rf.log = rf.log[:i]
+	rf.log = append(rf.log, args.Entries[j:]...)
 	
 	newCommitIndex := min(args.LeaderCommit, rf.lastLogIndex())
 	if newCommitIndex > rf.commitIndex {
-		//log.Printf("[follower: %d, term: %d] commit: [%d, %d]\n", rf.me, rf.currentTerm, rf.commitIndex + 1, newCommitIndex)
+		log.Printf("[follower: %d, term: %d] commit: [%d, %d]\n", rf.me, rf.currentTerm, rf.commitIndex + 1, newCommitIndex)
 		for i := rf.commitIndex + 1;
 		    i <= newCommitIndex;
 		    i++ {
-			//log.Printf("[follower: %d, term: %d] apply command [%v] with index [%d]\n", rf.me, rf.currentTerm, rf.log[rf.logi(i)].Command, rf.logi(i))
+			if rf.logi(i) <= 0 {
+				log.Printf("%d load snapshot [:%d]\n", rf.me, rf.lastIncludedIndex())
+				rf.applyCh <- ApplyMsg{false, nil, rf.lastIncludedIndex()}
+				i = rf.lastIncludedIndex()
+				continue // ++
+			}
+			
+			log.Printf("[follower: %d, term: %d] apply command [%v] with index [%d]\n", rf.me, rf.currentTerm, rf.log[rf.logi(i)].Command, i)
 			rf.applyCh <- ApplyMsg{true, rf.log[rf.logi(i)].Command, i}
 		}
 		rf.commitIndex = newCommitIndex
 	}
 	
-	//log.Printf("[follower: %d, term: %d] success AppendEntries with [PrevLogIndex: %d PrevLogTerm: %d] from [leader: %d, term: %d]\n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.LeaderId, args.Term)
+	log.Printf("[follower: %d, term: %d] success AppendEntries with [PrevLogIndex: %d PrevLogTerm: %d] from [leader: %d, term: %d]\n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.LeaderId, args.Term)
 	reply.Success = true
 	
 	rf.persist()
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	if rf.killed() {
+		return
+	}
+	
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	
+	log.Printf("[follower: %d, term: %d] receive InstallSnapshot with [LastIncludedIndex: %d, LastIncludedTerm: %d] from [leader: %d, term: %d]\n", rf.me, rf.currentTerm, args.LastIncludedIndex, args.LastIncludedTerm, args.LeaderId, args.Term)
+	
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		if rf.state != follower {
+			rf.turnFollower()
+		}
+	}
+	
+	reply.Term = rf.currentTerm
+	
+	if args.Term < rf.currentTerm {
+		log.Printf("[follower: %d, term: %d] reject InstallSnapshot from [leader: %d, term: %d]: term not match\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
+		return
+	}
+	
+	rf.electionTick.reset()
+	
+	if args.LastIncludedIndex < rf.lastIncludedIndex() {
+		return
+	}
+	
+	rf.snapshot(args.LastIncludedIndex, args.LastIncludedTerm, args.Data)
 }
 
 //
@@ -370,6 +474,14 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	if ok {
+		rf.installSnapshotFeedback(server, args, reply)
+	}
+	return ok
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -395,8 +507,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	
 	logIndex := rf.lastLogIndex() + 1
 	rf.log = append(rf.log, LogEntries{command, rf.currentTerm, logIndex})
+	log.Printf("[leader: %d, term: %d] append new command [%v] in index [%d]", rf.me, rf.currentTerm, command, logIndex)
 	rf.persist()
-	//log.Printf("[leader: %d, term: %d] append new command [%v] in index [%d]", rf.me, rf.currentTerm, command, logIndex)
 	
 	rf.heartbeatTick.trigger()
 	
@@ -419,7 +531,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.electionTick.stop()
 	rf.heartbeatTick.stop()
-	//log.Printf("%d dead\n", rf.me)
+	log.Printf("%d dead\n", rf.me)
 }
 
 func (rf *Raft) killed() bool {
@@ -432,11 +544,11 @@ func (rf *Raft) turnCandidate() {
 	rf.votedFor = rf.me
 	rf.vote = 1
 	rf.currentTerm++
-	//log.Printf("%d turn candidate with term %d\n", rf.me, rf.currentTerm)
+	log.Printf("%d turn candidate with term %d\n", rf.me, rf.currentTerm)
 }
 
 func (rf *Raft) turnFollower() {
-	//log.Printf("%d turn follower with term %d\n", rf.me, rf.currentTerm)
+	log.Printf("%d turn follower with term %d\n", rf.me, rf.currentTerm)
 	rf.state = follower
 	rf.votedFor = -1
 	rf.heartbeatTick.stop()
@@ -451,7 +563,7 @@ func (rf *Raft) turnLeader() {
 	}
 	rf.electionTick.stop()
 	rf.heartbeatTick.trigger()
-	//log.Printf("%d turn leader with term %d\n", rf.me, rf.currentTerm)
+	log.Printf("%d turn leader with term %d\n", rf.me, rf.currentTerm)
 }
 
 func (rf *Raft) receiveVote(peer int, args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -475,7 +587,7 @@ func (rf *Raft) receiveVote(peer int, args *RequestVoteArgs, reply *RequestVoteR
 	
 	if reply.VoteGranted {
 		rf.vote++
-		//log.Printf("%d receive vote from %d, vote: %d", rf.me, peer, rf.vote)
+		log.Printf("%d receive vote from %d, vote: %d", rf.me, peer, rf.vote)
 	}
 	
 	if rf.vote > (len(rf.peers) / 2) {
@@ -495,7 +607,7 @@ func (rf *Raft) election() {
 	rf.turnCandidate()
 	rf.persist()
 	
-	//log.Printf("%d begin election\n", rf.me)
+	log.Printf("%d begin election\n", rf.me)
 	
 	lastLogIndex := rf.lastLogIndex()
 	lastLogTerm := rf.log[rf.logi(lastLogIndex)].Term
@@ -513,7 +625,7 @@ func (rf *Raft) election() {
 		}
 		reply := RequestVoteReply{}
 		
-		//log.Printf("%d send RequestVote to %d\n", rf.me, peer)
+		log.Printf("%d send RequestVote to %d\n", rf.me, peer)
 		go rf.sendRequestVote(peer, &args, &reply)
 	}
 }
@@ -529,10 +641,17 @@ func (rf *Raft) checkCommit() {
 	if rf.commitIndex < matchIndex[half] &&
 	   rf.currentTerm == rf.log[rf.logi(matchIndex[half])].Term {
 		for i := rf.commitIndex + 1; i <= matchIndex[half]; i++ {
-			//log.Printf("[leader: %d, term: %d] apply command [%v] with index [%d]\n", rf.me, rf.currentTerm, rf.log[rf.logi(i)].Command, rf.logi(i))
+			if rf.logi(i) <= 0 {
+				log.Printf("%d load snapshot [:%d]\n", rf.me, rf.lastIncludedIndex())
+				rf.applyCh <- ApplyMsg{false, nil, rf.lastIncludedIndex()}
+				i = rf.lastIncludedIndex()
+				continue // ++
+			}
+			
+			log.Printf("[leader: %d, term: %d] apply command [%v] with index [%d]\n", rf.me, rf.currentTerm, rf.log[rf.logi(i)].Command, i)
 			rf.applyCh <- ApplyMsg{true, rf.log[rf.logi(i)].Command, i}
 		}
-		//log.Printf("[leader: %d, term: %d] commit: [%d, %d]\n", rf.me, rf.currentTerm, rf.commitIndex + 1, matchIndex[half])
+		log.Printf("[leader: %d, term: %d] commit: [%d, %d]\n", rf.me, rf.currentTerm, rf.commitIndex + 1, matchIndex[half])
 		rf.commitIndex = matchIndex[half]
 	}
 }
@@ -545,7 +664,7 @@ func (rf *Raft) appendEntriesFeedback(peer int, args *AppendEntriesArgs, reply *
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	
-	//log.Printf("[leader: %d, term: %d] receive AppendEntries feedback with [PrevLogIndex: %d, PrevLogTerm: %d, entries: %v] from [follower: %d, term: %d] \n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.Entries, peer, reply.Term)
+	log.Printf("[leader: %d, term: %d] receive AppendEntries feedback with [PrevLogIndex: %d, PrevLogTerm: %d, entries: %v] from [follower: %d, term: %d] \n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.Entries, peer, reply.Term)
 	
 	if rf.state != leader || args.Term != rf.currentTerm {
 		return
@@ -586,13 +705,54 @@ func (rf *Raft) appendEntriesFeedback(peer int, args *AppendEntriesArgs, reply *
 		}
 	}
 	
+	if rf.nextIndex[peer] <= rf.lastIncludedIndex() {
+		args := InstallSnapshotArgs {
+			Term: rf.currentTerm,
+			LeaderId: rf.me,
+			LastIncludedIndex: rf.lastIncludedIndex(),
+			LastIncludedTerm: rf.log[0].Term,
+			Data: rf.persister.ReadSnapshot(),
+		}
+		reply := InstallSnapshotReply{}
+		
+		rf.nextIndex[peer] = rf.lastIncludedIndex() + 1
+		
+		log.Printf("[leader: %d, term: %d] re-send InstallSnapshot with [LastIncludedIndex: %d, LastIncludedTerm: %d] to [follower: %d]\n", rf.me, rf.currentTerm, args.LastIncludedIndex, args.LastIncludedTerm, peer)
+		
+		go rf.sendInstallSnapshot(peer, &args, &reply)
+		return
+	}
+	
 	args.PrevLogIndex = rf.nextIndex[peer] - 1
 	args.PrevLogTerm = rf.log[rf.logi(args.PrevLogIndex)].Term
 	args.Entries = nil
 	
-	//log.Printf("[leader: %d, term: %d] re-send AppendEntries with [PrevLogIndex: %d, PrevLogTerm: %d, entries: %v] to [follower: %d]\n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.Entries, peer)
+	log.Printf("[leader: %d, term: %d] re-send AppendEntries with [PrevLogIndex: %d, PrevLogTerm: %d, entries: %v] to [follower: %d]\n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.Entries, peer)
 	
 	go rf.sendAppendEntries(peer, args, reply)
+}
+
+func (rf *Raft) installSnapshotFeedback(peer int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	if rf.killed() {
+		return
+	}
+	
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	
+	log.Printf("[leader: %d, term: %d] receive InstallSnapshot feedback with [LastIncludedIndex: %d, LastIncludedTerm: %d] from [follower: %d, term: %d] \n", rf.me, rf.currentTerm, args.LastIncludedIndex, args.LastIncludedTerm, peer, reply.Term)
+	
+	if rf.state != leader || args.Term != rf.currentTerm {
+		return
+	}
+	
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.turnFollower()
+		rf.persist()
+	}
+	
+	rf.matchIndex[peer] = args.LastIncludedIndex
 }
 
 func (rf *Raft) heartbeats() {
@@ -601,6 +761,24 @@ func (rf *Raft) heartbeats() {
 	
 	for peer := range rf.peers {
 		if peer == rf.me {
+			continue
+		}
+		
+		if rf.nextIndex[peer] <= rf.lastIncludedIndex() {
+			args := InstallSnapshotArgs {
+				Term: rf.currentTerm,
+				LeaderId: rf.me,
+				LastIncludedIndex: rf.lastIncludedIndex(),
+				LastIncludedTerm: rf.log[0].Term,
+				Data: rf.persister.ReadSnapshot(),
+			}
+			reply := InstallSnapshotReply{}
+			
+			rf.nextIndex[peer] = rf.lastIncludedIndex() + 1
+			
+			log.Printf("[leader: %d, term: %d] send InstallSnapshot with [LastIncludedIndex: %d, LastIncludedTerm: %d] to [follower: %d]\n", rf.me, rf.currentTerm, args.LastIncludedIndex, args.LastIncludedTerm, peer)
+			
+			go rf.sendInstallSnapshot(peer, &args, &reply)
 			continue
 		}
 		
@@ -620,8 +798,7 @@ func (rf *Raft) heartbeats() {
 			rf.nextIndex[peer] = rf.lastLogIndex() + 1
 		}
 		
-		//log.Printf("[leader: %d, term: %d] send AppendEntries with [PrevLogIndex: %d, PrevLogTerm: %d, entries: %v] to [follower: %d]\n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.Entries, peer)
-		
+		log.Printf("[leader: %d, term: %d] send AppendEntries with [PrevLogIndex: %d, PrevLogTerm: %d, entries: %v] to [follower: %d]\n", rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.Entries, peer)
 		go rf.sendAppendEntries(peer, &args, &reply)
 	}
 }

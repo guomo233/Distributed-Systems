@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"bytes"
 )
 
 const Debug = 0
@@ -19,6 +20,8 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+// TODO more effective
+// TODO TestSnapshotUnreliableRecover3B will trigger bug sometimes
 
 type Op struct {
 	// Your definitions here.
@@ -46,23 +49,56 @@ type KVServer struct {
 	kv map[string]string
 	nowIndex int
 	persister *raft.Persister
+	snapshotCh chan struct{}
+}
+
+func (kv *KVServer) genSnapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.kv)
+	e.Encode(kv.lastApplied)
+	e.Encode(kv.nowIndex)
+	data := w.Bytes()
+	return data
+}
+
+func (kv *KVServer) snapshot() {
+	for {
+		for kv.maxraftstate > 0 &&
+		   kv.persister.RaftStateSize() >= kv.maxraftstate {
+			log.Printf("[Server %d] size %d > %d, begin snapshot\n", kv.me, kv.persister.RaftStateSize(), kv.maxraftstate)
+			kv.mu.Lock()
+			snapshot := kv.genSnapshot()
+			lastIncludedIndex := kv.nowIndex
+			kv.mu.Unlock()
+			
+			kv.rf.Snapshot(lastIncludedIndex, snapshot)
+			log.Printf("[Server %d] snapshot done, size %d < %d\n", kv.me, kv.persister.RaftStateSize(), kv.maxraftstate)
+		}
+		
+		<- kv.snapshotCh
+	}
+}
+
+func (kv *KVServer) checkSnapshot() {
+	select {
+	case kv.snapshotCh <- struct{}{}:
+	default: // non-block
+	}
 }
 
 func (kv *KVServer) applyCommand(op Op) {
-	
 	if op.Op != "Get" {
-        if kv.lastApplied[op.ClerkId] == op.OpId {
+		if kv.lastApplied[op.ClerkId] == op.OpId {
 			return
 		}
-
+		
 		kv.lastApplied[op.ClerkId] = op.OpId
 		
 		switch op.Op {
 		case "Put":
-			log.Printf("[Server %d] apply request[%d:%d] Put(%s, %s)\n", kv.me, op.ClerkId, op.OpId, op.Key, op.Value)
 			kv.kv[op.Key] = op.Value
 		case "Append":
-			log.Printf("[Server %d] apply request[%d:%d] Append(%s, %s)\n", kv.me, op.ClerkId, op.OpId, op.Key, op.Value)
 			kv.kv[op.Key] += op.Value
 		}
 	}
@@ -72,24 +108,34 @@ func (kv *KVServer) applyCommand(op Op) {
 	}
 }
 
-func (kv *KVServer) checkApply() {
-	for {
-		applyMsg := <-kv.applyCh
-		
-		kv.mu.Lock()
-		
-		op := applyMsg.Command.(Op)
-		kv.applyCommand(op)
-		
-		kv.nowIndex = applyMsg.CommandIndex
-		
-		kv.mu.Unlock()
+func (kv *KVServer) applySnapshot() {
+	snapshot := kv.persister.ReadSnapshot()
+	
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+	
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	var kvs map[string]string
+	var lastApplied map[int64]int64
+	var nowIndex int
+	if d.Decode(&kvs) != nil ||
+	   d.Decode(&lastApplied) != nil ||
+	   d.Decode(&nowIndex) != nil {
+		// TODO error...
+	} else {
+		kv.kv = kvs
+		kv.lastApplied = lastApplied
+		kv.nowIndex = nowIndex
 	}
 }
 
 func (kv *KVServer) registerFeedback(ch chan struct{}, opId int64, handler func()) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	
 	kv.applyFeedback[opId] = func() {
-		delete(kv.applyFeedback, opId)
 		if handler != nil {
 			handler()
 		}
@@ -98,6 +144,9 @@ func (kv *KVServer) registerFeedback(ch chan struct{}, opId int64, handler func(
 }
 
 func (kv *KVServer) cancelFeedback(opId int64) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+		
 	delete(kv.applyFeedback, opId)
 }
 
@@ -110,24 +159,42 @@ func (kv *KVServer) waitFeedback(ch chan struct{}, timeout int) bool {
 	}
 }
 
+func (kv *KVServer) checkApply() {
+	for {
+		applyMsg := <-kv.applyCh
+		
+		kv.mu.Lock()
+		
+		if applyMsg.CommandValid {
+			op := applyMsg.Command.(Op)
+			kv.applyCommand(op)
+			log.Printf("[Server %d] apply request[%d:%d] %s(%s, %s) with index %d\n", kv.me, op.ClerkId, op.OpId, op.Op, op.Key, op.Value, applyMsg.CommandIndex)
+		} else {
+			kv.applySnapshot()
+			log.Printf("[Server %d] apply snapshot [:%d]\n", kv.me, applyMsg.CommandIndex)
+		}
+		
+		kv.nowIndex = applyMsg.CommandIndex
+		
+		kv.mu.Unlock()
+		
+		kv.checkSnapshot()
+	}
+}
+
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	opId := nrand()
 	
 	feedbackCh := make(chan struct{}, 1)
-	
-	kv.mu.Lock()
 	kv.registerFeedback(feedbackCh, opId, func() {
 		reply.Value = kv.kv[args.Key]
 	})
-	kv.mu.Unlock()
+	defer kv.cancelFeedback(opId)
 	
 	op := Op{OpId: opId}
 	if _, _, ok := kv.rf.Start(op); !ok {
 		log.Printf("[Server %d] reject request Get(%s): isn't leader\n", kv.me, args.Key)
-		kv.mu.Lock()
-		kv.cancelFeedback(opId)
-		kv.mu.Unlock()
 		
 		reply.Err = ErrWrongLeader
 		return
@@ -145,8 +212,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	feedbackCh := make(chan struct{}, 1)
-	
 	kv.mu.Lock()
 	
 	if kv.lastApplied[args.ClerkId] == args.OpId {
@@ -156,16 +221,15 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	
-	kv.registerFeedback(feedbackCh, args.OpId, nil)
-	
 	kv.mu.Unlock()
+	
+	feedbackCh := make(chan struct{}, 1)
+	kv.registerFeedback(feedbackCh, args.OpId, nil)
+	defer kv.cancelFeedback(args.OpId)
 	
 	op := Op{args.Op, args.Key, args.Value, args.ClerkId, args.OpId}
 	if _, _, ok := kv.rf.Start(op); !ok {
 		log.Printf("[Server %d] reject request[%d:%d] %s(%s, %s): isn't leader\n", kv.me, args.ClerkId, args.OpId, args.Op, args.Key, args.Value)
-		kv.mu.Lock()
-		kv.cancelFeedback(args.OpId)
-		kv.mu.Unlock()
 		
 		reply.Err = ErrWrongLeader
 		return
@@ -230,12 +294,16 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyFeedback = make(map[int64](func()))
 	kv.kv = make(map[string]string)
 	kv.persister = persister
+	kv.snapshotCh = make(chan struct{}, 1)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.applySnapshot()
+	
 	go kv.checkApply()
+	go kv.snapshot()
 	
 	return kv
 }

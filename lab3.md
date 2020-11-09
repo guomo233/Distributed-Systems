@@ -20,5 +20,9 @@
 
 ## 实验要求
 
-* K/V Server 负责创建快照，并通知 Raft 丢弃日志；
-* 
+* `maxraftstate`为创建快照的 Raft 日志大小阈值，如果为 -1 则无需创建快照，通过`persister.RaftStateSize()`获取 Raft 日志大小；
+* K/V Server 通知 Raft 使用`persister.SaveStateAndSnapshot()`同时保存 Raft 状态和快照，以使得日志的删除与快照的存储作为一个原子操作；
+* 使用`persister.ReadSnapshot()`来读取最新的快照；
+* Your kvserver must be able to detect duplicated operations in the log across checkpoints, so any state you are using to detect them must be included in the snapshots.？？？
+* 允许在单个 InstallSnapshot RPC 中发送整个快照代替论文中的分块发送；
+
