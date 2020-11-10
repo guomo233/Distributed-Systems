@@ -57,13 +57,15 @@ func (kv *KVServer) genSnapshot() []byte {
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.kv)
 	e.Encode(kv.lastApplied)
-	e.Encode(kv.nowIndex)
+//	e.Encode(kv.nowIndex)
 	data := w.Bytes()
 	return data
 }
 
 func (kv *KVServer) snapshot() {
 	for {
+		<- kv.snapshotCh
+		
 		for kv.maxraftstate > 0 &&
 		   kv.persister.RaftStateSize() >= kv.maxraftstate {
 			log.Printf("[Server %d] size %d > %d, begin snapshot\n", kv.me, kv.persister.RaftStateSize(), kv.maxraftstate)
@@ -75,8 +77,6 @@ func (kv *KVServer) snapshot() {
 			kv.rf.Snapshot(lastIncludedIndex, snapshot)
 			log.Printf("[Server %d] snapshot done, size %d < %d\n", kv.me, kv.persister.RaftStateSize(), kv.maxraftstate)
 		}
-		
-		<- kv.snapshotCh
 	}
 }
 
@@ -119,15 +119,15 @@ func (kv *KVServer) applySnapshot() {
 	d := labgob.NewDecoder(r)
 	var kvs map[string]string
 	var lastApplied map[int64]int64
-	var nowIndex int
+//	var nowIndex int
 	if d.Decode(&kvs) != nil ||
-	   d.Decode(&lastApplied) != nil ||
-	   d.Decode(&nowIndex) != nil {
+	   d.Decode(&lastApplied) != nil {
+//	   d.Decode(&nowIndex) != nil {
 		// TODO error...
 	} else {
 		kv.kv = kvs
 		kv.lastApplied = lastApplied
-		kv.nowIndex = nowIndex
+//		kv.nowIndex = nowIndex
 	}
 }
 

@@ -20,7 +20,7 @@ Leader 处理：
 * 否则，nextIndex 设置为 XIndex；
 
 # 接口
-Raft 实现于 src/raft/raft.go，向上层服务暴露的接口如下：
+Raft 向上层服务暴露的接口如下：
 ```go
 // 启动当前 peer
 // peers: 保存所有 peer（包括当前），所有 peer 上数组顺序相同
@@ -43,20 +43,28 @@ type ApplyMsg
 ```
 由于每个 peer 中`peers`是固定的，peer 和 Raft 的关系不是“加入与否”的关系，而是“启动与否”的关系，当一个 peer 启动后 leader 会感知到然后向其发送心跳，所以 Raft 启动时不涉及成员变更的问题
 
-每个 peer 是一个`*labrpc.ClientEnd`类型，提供了一个`Call`方法供`sendRequestVote`进行 RPC，`labrpc`包模拟了一种丢包网络
+每个 peer 是一个`*labrpc.ClientEnd`类型，提供了一个`Call`方法供`sendRequestVote`进行 RPC，`labrpc`包模拟了一种丢包网络；
 
-# 计时器
-计时器实现于 raft/ticker.go，为了能异步的将计时器安全重置，将计时器的时钟变量设置为原子变量（通过`sync/atomic`包装）。计时器实现所涉及的细节：
+注意：所提供的 RPC 为浅拷贝
+
+# 流程
+![raft](images/raft.jpg)
+
+# 实现细节
+
+## 计时器
+为了能异步的将计时器安全重置，将计时器的时钟变量设置为原子变量（通过`sync/atomic`包装）。计时器实现所涉及的细节：
 ```go
 // bias: 每次 timeout 的随机扰动范围
-// before: 是否 handler 的调用在 sleep 之前
-func newTick(timeout int, bias int, handler func (), before bool) *ticker {
+func newTick(timeout int, bias int, handler func()) *ticker {
 	t := &ticker{}
 	t.stopCh = make(chan struct{}, 1) // 容量为 1 才能让 stop 先于 beginTick，否则会死锁
 	t.startCh = make(chan struct{})
-	t.reset()
+  t.handler = handler
+	t.timeout = timeout
+	t.bias = bias
 	t.stop() // 先 stop 再调用 beginTick
-	go t.beginTick(timeout, bias, handler, before)
+	go t.beginTick()
 	return t
 }
 
@@ -69,17 +77,17 @@ func (t *ticker) stop() {
 
 func (t *ticker) start() {
 	if t.stoped { 
-		t.reset()
 		t.startCh <- struct{}{}
 		t.stoped = false // 防止对 start 的重复调用引起 startCh 阻塞
 	}
 }
+
+// 提供能在开启定时器时立马先调用一次 handler 的方法（如 heartbeat 有此需求）
+func (t *ticker) trigger() {
+	t.now.set(t.timeout + t.bias)
+	t.start()
+}
 ```
-
-# 实现细节
-
-## 流程
-![raft](images/raft.jpg)
 
 ## 初始化
 ```go
@@ -93,10 +101,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartbeatTick = newTick(100, 0, rf.heartbeats, true)  // heartbeats 调用优先于计时
 	
   // ...
-  // 在 index 0 处填充一个空日志，以便从 1 开始 index
+  // 在 index 0 处填充一个空日志，以便作为 PrevLog
 	if len(rf.log) == 0 {
 		rf.log = append(rf.log, LogEntries{nil, 0})
 	}
+	// ...
+}
+```
+
+## 添加日志
+```go
+func (rf *Raft) Start(command interface{}) (int, int, bool) {
+  // ...
+	// 立马将新日志同步出去，提升单个请求的响应速度
+	rf.heartbeatTick.trigger()
 	// ...
 }
 ```
@@ -211,6 +229,10 @@ func (rf *Raft) hearbeatFeedback(peer int, args *AppendEntriesArgs, reply *Appen
 	
 	if reply.Success {
 		// ...
+    // 每次收到后都检查一下是否可提交，而非定时或延迟检查，提升单个请求的响应速度
+    if rf.matchIndex[peer] > rf.commitIndex {
+			rf.checkCommit()
+		}
 	} else {
 		rf.matchIndex[peer] = 0 // 应该重置 match
 		// ...

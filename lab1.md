@@ -5,8 +5,6 @@
 # 流程
 ![mapreduce](images/mapreduce.jpg)
 
-红色为 Master 的函数，蓝色为 Woker 的函数
-
 # 实现细节
 Master 实现于 mr/master.go，由 main/mrmaster.go 驱动，通过命令行参数传入输入文件：
 ```go
