@@ -19,7 +19,14 @@ Leader 处理：
 * 若存在 term 为 XTerm 的日志，将 nextIndex 设置为该 term 的最后一个日志；
 * 否则，nextIndex 设置为 XIndex；
 
+# RPC
+
+* 每个 peer 是一个`*labrpc.ClientEnd`类型，提供了一个`Call`方法供`sendRequestVote`进行 RPC，`labrpc`包模拟了一种丢包网络；
+* 所提供的 RPC 为浅拷贝；
+* RPC 传递的`struct`不能以`interface{}`存储不同的类型，否则会无法解析；
+
 # 接口
+
 Raft 向上层服务暴露的接口如下：
 ```go
 // 启动当前 peer
@@ -42,10 +49,6 @@ rf.Kill()
 type ApplyMsg
 ```
 由于每个 peer 中`peers`是固定的，peer 和 Raft 的关系不是“加入与否”的关系，而是“启动与否”的关系，当一个 peer 启动后 leader 会感知到然后向其发送心跳，所以 Raft 启动时不涉及成员变更的问题
-
-每个 peer 是一个`*labrpc.ClientEnd`类型，提供了一个`Call`方法供`sendRequestVote`进行 RPC，`labrpc`包模拟了一种丢包网络；
-
-注意：所提供的 RPC 为浅拷贝
 
 # 流程
 ![raft](images/raft.jpg)

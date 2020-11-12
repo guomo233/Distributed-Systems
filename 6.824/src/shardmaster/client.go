@@ -12,6 +12,8 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	leader int
+	clerkId int64
 }
 
 func nrand() int64 {
@@ -25,6 +27,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.clerkId = nrand()
 	return ck
 }
 
@@ -34,67 +37,75 @@ func (ck *Clerk) Query(num int) Config {
 	args.Num = num
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
+		nServers := len(ck.servers)
+		for i := 0; i < nServers; i++ {
 			var reply QueryReply
-			ok := srv.Call("ShardMaster.Query", args, &reply)
+			ok := ck.servers[ck.leader].Call("ShardMaster.Query", args, &reply)
 			if ok && reply.WrongLeader == false {
 				return reply.Config
 			}
+			ck.leader = (ck.leader + 1) % nServers
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
+	args := &JoinArgs{ClerkId: ck.clerkId, OpId: nrand()}
 	// Your code here.
 	args.Servers = servers
 
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
+		nServers := len(ck.servers)
+		for i := 0; i < nServers; i++ {
 			var reply JoinReply
-			ok := srv.Call("ShardMaster.Join", args, &reply)
+			ok := ck.servers[ck.leader].Call("ShardMaster.Join", args, &reply)
 			if ok && reply.WrongLeader == false {
 				return
 			}
+			ck.leader = (ck.leader + 1) % nServers
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
+	args := &LeaveArgs{ClerkId: ck.clerkId, OpId: nrand()}
 	// Your code here.
 	args.GIDs = gids
 
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
+		nServers := len(ck.servers)
+		for i := 0; i < nServers; i++ {
 			var reply LeaveReply
-			ok := srv.Call("ShardMaster.Leave", args, &reply)
+			ok := ck.servers[ck.leader].Call("ShardMaster.Leave", args, &reply)
 			if ok && reply.WrongLeader == false {
 				return
 			}
+			ck.leader = (ck.leader + 1) % nServers
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
+	args := &MoveArgs{ClerkId: ck.clerkId, OpId: nrand()}
 	// Your code here.
 	args.Shard = shard
 	args.GID = gid
 
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
+		nServers := len(ck.servers)
+		for i := 0; i < nServers; i++ {
 			var reply MoveReply
-			ok := srv.Call("ShardMaster.Move", args, &reply)
+			ok := ck.servers[ck.leader].Call("ShardMaster.Move", args, &reply)
 			if ok && reply.WrongLeader == false {
 				return
 			}
+			ck.leader = (ck.leader + 1) % nServers
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
