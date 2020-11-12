@@ -192,7 +192,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	})
 	defer kv.cancelFeedback(opId)
 	
-	op := Op{OpId: opId}
+	op := Op{Op: "Get", OpId: opId}
 	if _, _, ok := kv.rf.Start(op); !ok {
 		log.Printf("[Server %d] reject request Get(%s): isn't leader\n", kv.me, args.Key)
 		
