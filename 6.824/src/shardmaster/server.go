@@ -48,7 +48,6 @@ type ShardMaster struct {
 	maxraftstate int
 }
 
-
 type Op struct {
 	// Your data here.
 	Op string
@@ -76,6 +75,7 @@ func (sm *ShardMaster) genSnapshot() []byte {
 	e := labgob.NewEncoder(w)
 	e.Encode(sm.configs)
 	e.Encode(sm.lastApplied)
+	e.Encode(sm.slots)
 	data := w.Bytes()
 	return data
 }
@@ -332,12 +332,15 @@ func (sm *ShardMaster) applySnapshot() {
 	d := labgob.NewDecoder(r)
 	var configs []Config
 	var lastApplied map[int64]int64
+	var slots []groupSlot
 	if d.Decode(&configs) != nil ||
-	   d.Decode(&lastApplied) != nil {
+	   d.Decode(&lastApplied) != nil ||
+	   d.Decode(&slots) != nil {
 		// TODO error...
 	} else {
 		sm.configs = configs
 		sm.lastApplied = lastApplied
+		sm.slots = slots
 	}
 }
 
