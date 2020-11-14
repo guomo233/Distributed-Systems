@@ -27,7 +27,7 @@ type ticker struct {
 	bias int
 	stopCh chan struct{}
 	startCh chan struct{}
-	stoped bool
+	stoped atomicValue
 }
 
 func (t *ticker) beginTick() {
@@ -64,16 +64,16 @@ func newTick(timeout int, bias int, handler func()) *ticker {
 }
 
 func (t *ticker) stop() {
-	if !t.stoped {
+	if t.stoped.get() == 0 {
 		t.stopCh <- struct{}{}
-		t.stoped = true
+		t.stoped.set(1)
 	}
 }
 
 func (t *ticker) start() {
-	if t.stoped {
+	if t.stoped.get() == 1 {
 		t.startCh <- struct{}{}
-		t.stoped = false
+		t.stoped.set(0)
 	}
 }
 
