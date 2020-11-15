@@ -1,9 +1,7 @@
 # Labs
 
-* [lab1](lab1.md)：MapReduce
-* [lab2](lab2.md)：Raft
-* [lab3](lab3.md)：K/V Service、Snapshot
-* [lab4](lab4.md)：Sharded K/V Service
-	* Part A：Load balancing（Done）；
-	* Part B：Shift Shards（TODO）；
-
+* [lab1](lab1.md)：MapReduce（Done）
+* [lab2](lab2.md)：Raft（Done）
+* [lab3](lab3.md)：K/V Service、Snapshot（Done）
+* [lab4](lab4.md)：Sharded K/V Service（Done）
+	* Challenge（TODO）；

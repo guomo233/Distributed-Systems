@@ -22,8 +22,8 @@ Leader 处理：
 # RPC
 
 * 每个 peer 是一个`*labrpc.ClientEnd`类型，提供了一个`Call`方法供`sendRequestVote`进行 RPC，`labrpc`包模拟了一种丢包网络；
-* 所提供的 RPC 为浅拷贝；
-* RPC 传递的`struct`不能以`interface{}`存储不同的类型，否则会无法解析；
+* RPC 被实现为浅拷贝；
+* 若要传递自定义类型，需要注册`labgob.Register(MyType{})`；
 
 # 接口
 
