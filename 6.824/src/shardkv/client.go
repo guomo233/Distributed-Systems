@@ -13,6 +13,7 @@ import "crypto/rand"
 import "math/big"
 import "../shardmaster"
 import "time"
+import "log"
 
 //
 // which shard is a key in?
@@ -40,6 +41,7 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	clerkId int64
 }
 
 //
@@ -56,6 +58,7 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.clerkId = nrand()
 	return ck
 }
 
@@ -77,6 +80,7 @@ func (ck *Clerk) Get(key string) string {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply GetReply
+				log.Printf("[Client] send request Get(%s) shard %d to group %d\n", key, shard, gid)
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 					return reply.Value
@@ -104,7 +108,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
+	args.ClerkId = ck.clerkId
+	args.OpId = nrand()
 
 	for {
 		shard := key2shard(key)
@@ -113,6 +118,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
+				log.Printf("[Client] send request[%d:%d] %s(%s, %s) shard %d to group %d\n", args.ClerkId, args.OpId, op, key, value, shard, gid)
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if ok && reply.Err == OK {
 					return
